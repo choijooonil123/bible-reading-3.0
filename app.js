@@ -94,6 +94,41 @@
     }
   }
   ensureHeardBox();
+
+  // voice-bible 스타일의 임시/최종 출력 박스 자동 생성 (없을 때만)
+  function ensureVoiceBibleUI() {
+    if (document.getElementById("interim") && document.getElementById("final")) return;
+    const wrap = document.createElement("section");
+    wrap.style.cssText = "margin-top:12px; border:1px solid #252a36; border-radius:12px; overflow:hidden;";
+    const h = document.createElement("div");
+    h.textContent = "확정(최종) 전사";
+    h.style.cssText = "padding:10px 12px; background:#161a22; color:#b7c3d6; border-bottom:1px solid #252a36; font-size:14px;";
+    wrap.appendChild(h);
+    const content = document.createElement("div");
+    content.style.cssText = "padding:12px; background:#161a22;";
+    const interim = document.createElement("div");
+    interim.id = "interim";
+    interim.textContent = "(말하면 여기에 흐릿하게 보입니다…)";
+    interim.style.cssText = "min-height:40px; color:#cbd5e1; white-space:pre-wrap; line-height:1.6;";
+    const final = document.createElement("div");
+    final.id = "final";
+    final.style.cssText = "min-height:90px; margin-top:10px; color:#ffffff; white-space:pre-wrap; line-height:1.6;";
+    content.appendChild(interim);
+    content.appendChild(final);
+    const footer = document.createElement("div");
+    footer.style.cssText = "display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;";
+    footer.innerHTML = `
+      <label class="chip" style="font-size:12px; padding:6px 8px; border-radius:999px; border:1px solid #252a36;">
+        <input type="checkbox" id="autoPunc" checked> 구두점 보정(간단)
+      </label>
+      <label class="chip" style="font-size:12px; padding:6px 8px; border-radius:999px; border:1px solid #252a36;">
+        <input type="checkbox" id="autoscroll" checked> 자동 스크롤
+      </label>`;
+    content.appendChild(footer);
+    wrap.appendChild(content);
+    (els.verseContainer || document.body).appendChild(wrap);
+  }
+  ensureVoiceBibleUI();
    
   // 모달이 닫혀있을 때는 클릭 차단
   if (els.matrixModal) els.matrixModal.style.pointerEvents = "none";
@@ -105,10 +140,10 @@
   // ---------- State ----------
   const IS_ANDROID = /Android/i.test(navigator.userAgent);
 
-  // 레벨미터 사용 허용 여부: 안드로이드는 기본 OFF(충돌 회피)
-  const METER_ALLOWED = !IS_ANDROID; 
+  // ✅ 레벨미터 사용 허용(안드로이드 기본 OFF), 실행 상태 플래그
+  const METER_ALLOWED = !IS_ANDROID;
   let meterRunning = false;
-   
+
   const state = {
     bible: null, currentBookKo: null, currentChapter: null,
     verses: [], currentVerseIdx: 0,
@@ -484,19 +519,13 @@
   }
 
   // ---------- 표시/매칭 ----------
-  // ✅ 새 절로 넘어갈 때, 표시/히스토리/타이밍을 한 번에 초기화
   function resetHeard() {
-    // 화면 표시 텍스트 초기화
     if (els.heardBox) els.heardBox.textContent = "";
     if (els.heardTextLine) els.heardTextLine.textContent = "";
-
-    // voice-bible 미러링 요소(있으면 함께 비움)
     const interimEl = document.getElementById("interim");
     const finalEl   = document.getElementById("final");
     if (interimEl) interimEl.textContent = "";
     if (finalEl)   finalEl.textContent   = "";
-
-    // STT 누적/중간 상태 초기화
     if (state._sr) {
       state._sr.historyTokens = [];
       state._sr.historyBase   = [];
@@ -504,8 +533,6 @@
     state.heardText = "";
     state.heardRaw  = "";
     state.heardJ    = "";
-
-    // 페인트/매칭 타이밍 초기화
     state.paintedPrefix = 0;
     state.pendingPaint  = 0;
     state.ignoreUntilTs = 0;
@@ -552,9 +579,9 @@
         const tmp = dp[i];
         const cost = (s[i-1] === t[j-1]) ? 0 : 1;
         dp[i] = Math.min(
-          dp[i] + 1,        // 삭제
-          dp[i-1] + 1,      // 삽입
-          prev + cost       // 치환/일치
+          dp[i] + 1,
+          dp[i-1] + 1,
+          prev + cost
         );
         prev = tmp;
       }
@@ -587,14 +614,10 @@
   }
   function updateVerseText() {
     const v = state.verses[state.currentVerseIdx] || "";
-
-    // ✅ 초기화(표시 + STT 히스토리 + 페인트 타이머)
     resetHeard();
     state._advancing = false;
-
     state.targetJ = normalizeToJamo(v, false);
     state.charCumJamo = buildCharToJamoCumMap(v);
-
     els.locLabel && (els.locLabel.textContent =
       `${state.currentBookKo} ${state.currentChapter}장 ${state.currentVerseIdx + 1}절`);
     if (els.verseText) {
@@ -674,68 +697,66 @@
 
   // ---------- 마이크 레벨 ----------
   let audioCtx, analyser, micSrc, levelTimer, micStream;
-   async function startMicLevel() {
-     if (!METER_ALLOWED) return;           // 안드로이드는 기본 OFF
-     if (state._sr?.listening) return;     // SR 중에는 절대 켜지 않음
-     if (meterRunning) return;
-     meterRunning = true;
-     try {
-       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-       analyser = audioCtx.createAnalyser();
-       analyser.fftSize = 256;
-       micSrc = audioCtx.createMediaStreamSource(micStream);
-       micSrc.connect(analyser);
-   
-       const dataArray = new Uint8Array(analyser.fftSize);
-       function update() {
-         if (!analyser || !meterRunning) return;
-         analyser.getByteTimeDomainData(dataArray);
-         let sumSq = 0;
-         for (let i = 0; i < dataArray.length; i++) {
-           const v = (dataArray[i] - 128) / 128;
-           sumSq += v * v;
-         }
-         const rms = Math.sqrt(sumSq / dataArray.length);
-         const db = 20 * Math.log10(rms || 1e-6);
-         if (els.micBar) els.micBar.style.width = Math.min(100, Math.max(0, rms * 400)) + "%";
-         if (els.micDb)  els.micDb.textContent = (db <= -60 ? "-∞" : db.toFixed(0)) + " dB";
-         levelTimer = requestAnimationFrame(update);
-       }
-       update();
-     } catch (e) {
-       console.warn("[MicLevel] 마이크 접근 실패:", e);
-       meterRunning = false;
-     }
-   }
-   
-   function stopMicLevel() {
-     meterRunning = false;
-     if (levelTimer) cancelAnimationFrame(levelTimer);
-     levelTimer = null;
-     if (audioCtx) { try { audioCtx.close(); } catch(_) {} }
-     if (micStream) { try { micStream.getTracks().forEach(t=>t.stop()); } catch(_) {} }
-     audioCtx = null; analyser = null; micSrc = null; micStream = null;
-     if (els.micBar) els.micBar.style.width = "0%";
-     if (els.micDb)  els.micDb.textContent = "-∞ dB";
-   }
 
+  // ✅ 배타적 점유: SR이 켜져 있으면 시작 금지, 안드로이드 기본 OFF
+  async function startMicLevel() {
+    if (!METER_ALLOWED) return;
+    if (state._sr?.listening) return;
+    if (meterRunning) return;
+    meterRunning = true;
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      micSrc = audioCtx.createMediaStreamSource(micStream);
+      micSrc.connect(analyser);
 
-  // ---------- STT (voice-bible 코어 이식 + bible-reading-3.0 통합) ----------
+      const dataArray = new Uint8Array(analyser.fftSize);
+      function update() {
+        if (!analyser || !meterRunning) return;
+        analyser.getByteTimeDomainData(dataArray);
+        let sumSq = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const v = (dataArray[i] - 128) / 128;
+          sumSq += v * v;
+        }
+        const rms = Math.sqrt(sumSq / dataArray.length);
+        const db = 20 * Math.log10(rms || 1e-6);
+        if (els.micBar) els.micBar.style.width = Math.min(100, Math.max(0, rms * 400)) + "%";
+        if (els.micDb)  els.micDb.textContent = (db <= -60 ? "-∞" : db.toFixed(0)) + " dB";
+        levelTimer = requestAnimationFrame(update);
+      }
+      update();
+    } catch (e) {
+      console.warn("[MicLevel] 마이크 접근 실패:", e);
+      meterRunning = false;
+    }
+  }
+  function stopMicLevel() {
+    meterRunning = false;
+    if (levelTimer) cancelAnimationFrame(levelTimer);
+    levelTimer = null;
+    if (audioCtx) { try { audioCtx.close(); } catch(_) {} }
+    if (micStream) { try { micStream.getTracks().forEach(t=>t.stop()); } catch(_) {} }
+    audioCtx = null; analyser = null; micSrc = null; micStream = null;
+    if (els.micBar) els.micBar.style.width = "0%";
+    if (els.micDb)  els.micDb.textContent = "-∞ dB";
+  }
+
+  // ---------- STT (voice-bible 코어 이식 + 이중점유 해결 + 워치독) ----------
   (() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     const btnMic = els.btnToggleMic;
     const hintEl = els.listenHint;
 
-    // voice-bible 미러링 대상(있으면 함께 업데이트)
     const interimEl    = document.getElementById("interim");
     const finalEl      = document.getElementById("final");
     const autoPuncEl   = document.getElementById("autoPunc");
     const autoscrollEl = document.getElementById("autoscroll");
     const langSel      = document.getElementById("lang");
 
-    // STT 상태
     state._sr = {
       rec: null,
       listening: false,
@@ -743,6 +764,10 @@
       historyTokens: [],
       historyBase: []
     };
+
+    // 워치독(침묵시 final 플러시)
+    let silenceTimer = null;
+    const SILENCE_TIMEOUT_MS = 5000;
 
     // ===== 숫자 → 한글 수사 통일 =====
     const _N = ['영','일','이','삼','사','오','육','칠','팔','구'];
@@ -798,7 +823,7 @@
       });
     }
 
-    // ===== 구두점·토큰 유틸 =====
+    // ===== 구두점·토큰 =====
     const normalizeSpaces = (s)=> (s||'').replace(/\s+/g,' ').trim();
     const stripPuncTail   = (w)=> w.replace(/[\.,!?;:·…~]+$/u,'');
     const tokenize        = (s)=> normalizeSpaces(s).split(' ').filter(Boolean);
@@ -826,7 +851,7 @@
       return out.join(' ');
     }
 
-    // ===== 매칭/페인트/자동이동 훅 =====
+    // ===== 매칭/페인트/자동이동 =====
     function _applyMatchingAndMaybeAdvance(isFinal, candidateFullText){
       const v = state.verses[state.currentVerseIdx] || "";
       if (!v) return;
@@ -852,7 +877,7 @@
       }
     }
 
-    // ===== 최종 누적 + 강력 중복 제거 → 화면반영 → 매칭(최종) =====
+    // ===== 최종 누적 + 중복제거 =====
     function appendFinalDedup(newText){
       const newT = tokenize(newText);
       const newB = baseTokens(newT);
@@ -883,9 +908,7 @@
 
       const finalText = punctuate(toHangulDigitsAll(state._sr.historyTokens.join(' ')));
 
-      // 앱 UI
       if (els.heardBox) els.heardBox.textContent = finalText;
-      // voice-bible 미러링
       if (finalEl) {
         finalEl.textContent = finalText;
         if (autoscrollEl && autoscrollEl.checked){
@@ -896,19 +919,15 @@
       _applyMatchingAndMaybeAdvance(true, finalText);
     }
 
-    // ===== 중간 후보 → 화면반영 → 매칭(중간) =====
+    // ===== 중간 후보 =====
     function applyInterimCandidate(interimRaw){
       if (!interimRaw) return;
       const candidate = toHangulDigitsAll(
         (state._sr.historyTokens.join(' ') + ' ' + interimRaw).trim()
       );
       const printed = punctuate(candidate);
-
-      // 앱 UI
       if (els.heardBox) els.heardBox.textContent = printed;
-      // voice-bible 미러링
       if (interimEl) interimEl.textContent = printed;
-
       _applyMatchingAndMaybeAdvance(false, candidate);
     }
 
@@ -926,17 +945,14 @@
 
     async function startListening(showAlert=true){
       if (state._sr.listening) return;
-
-     // SR 시작 전, 레벨미터는 반드시 OFF (충돌 방지)
-     stopMicLevel();
-       
       if (!supportsSR()){
         if (hintEl) hintEl.innerHTML = "⚠️ 음성인식 미지원(Chrome/Samsung Internet 권장) — HTTPS에서 사용하세요.";
         if (showAlert) alert("이 브라우저는 음성인식을 지원하지 않습니다.");
         return;
       }
 
-      await startMicLevel(); // 레벨바 시작
+      // ✅ SR 시작 전엔 레벨미터 반드시 OFF (이중 점유 방지)
+      stopMicLevel();
 
       state._sr.userStopped   = false;
       state._sr.listening     = true;
@@ -947,7 +963,6 @@
       state._advancing        = false;
       if (state.paintTimer){ clearTimeout(state.paintTimer); state.paintTimer = null; }
 
-      // 출력 초기화
       if (els.heardBox) els.heardBox.textContent = "";
       if (interimEl) interimEl.textContent = "";
       if (finalEl)   finalEl.textContent   = "";
@@ -955,13 +970,13 @@
       if (btnMic) btnMic.textContent="⏹️";
       refreshRecogModeLock();
 
-     state._sr.rec = createRecognizer();
-     if (!state._sr.rec){
-       alert("음성인식 초기화 실패");
-       // SR 못 켰으면, 레벨미터는 필요 시 다시 ON
-       if (METER_ALLOWED) startMicLevel();
-       return;
-     }
+      state._sr.rec = createRecognizer();
+      if (!state._sr.rec){
+        alert("음성인식 초기화 실패");
+        // SR 못 켰다면, 허용되는 환경에선 레벨미터 복구
+        if (METER_ALLOWED) startMicLevel();
+        return;
+      }
 
       state._sr.rec.onresult = (e) => {
         let interim = '', fin = '';
@@ -971,7 +986,12 @@
           else interim += r[0].transcript;
         }
 
-        // 숫자 즉시 한글화 (일관성 ↑)
+        // 침묵 워치독 리셋
+        if (silenceTimer) clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => {
+          try { state._sr.rec && state._sr.rec.stop(); } catch(_) {}
+        }, SILENCE_TIMEOUT_MS);
+
         if (interim) {
           const interimSafe = interim.replace(/\d/g, d => "영일이삼사오육칠팔구"[d]);
           applyInterimCandidate(interimSafe);
@@ -979,7 +999,7 @@
         if (fin) {
           const finSafe = fin.replace(/\d/g, d => "영일이삼사오육칠팔구"[d]);
           appendFinalDedup(finSafe);
-          if (interimEl) interimEl.textContent = ""; // 확정 나오면 임시 클리어
+          if (interimEl) interimEl.textContent = "";
         }
       };
 
@@ -995,24 +1015,30 @@
       };
 
       state._sr.rec.onend = () => {
-        // 의도치 않은 종료면 자동 재시작 (모바일 안정화)
+        if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+        // 의도치 않은 종료면 재시작
         if (!state._sr.userStopped){
           try { state._sr.rec && state._sr.rec.start(); } catch(_){}
+        } else {
+          // 사용자가 끈 경우: 허용되는 환경이면 레벨미터 재개
+          if (METER_ALLOWED) startMicLevel();
         }
       };
 
-     try { state._sr.rec.start(); }
-     catch(e){
-       console.warn("rec.start 실패:", e);
-       // SR 시작 실패 시, 레벨미터 복구
-       if (METER_ALLOWED) startMicLevel();
-       return;
-     }
-   }
+      try { state._sr.rec.start(); }
+      catch(e){
+        console.warn("rec.start 실패:", e);
+        // SR 시작 실패 시 레벨미터 복구
+        if (METER_ALLOWED) startMicLevel();
+        return;
+      }
+    }
 
     function stopListening(resetBtn=true){
       state._sr.userStopped = true;
       state._sr.listening   = false;
+
+      if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
 
       if (state._sr.rec){
         try{
@@ -1025,25 +1051,22 @@
         state._sr.rec = null;
       }
 
-     // SR이 완전히 내려갔으니, 레벨미터는 허용되는 환경이면 다시 ON
-     if (METER_ALLOWED) startMicLevel();
-   
-     if (resetBtn && btnMic) btnMic.textContent="🎙️";
-     refreshRecogModeLock();
+      // SR 내려가면, 허용되는 환경에서만 레벨미터 켜기
+      if (METER_ALLOWED) startMicLevel();
+
+      if (resetBtn && btnMic) btnMic.textContent="🎙️";
+      refreshRecogModeLock();
     }
 
-    // 앱 마이크 토글
     els.btnToggleMic?.addEventListener("click", ()=> {
       if (!state._sr.listening) startListening();
       else                      stopListening();
     });
 
-    // voice-bible 호환: 언어 변경 시 재시작(해당 요소 있는 경우)
     langSel?.addEventListener("change", ()=>{
       if (state._sr?.listening){ stopListening(false); setTimeout(startListening, 120); }
     });
 
-    // 전역 디버그 노출(선택)
     window.__stt = { startListening, stopListening, resetHeard };
   })();
 
@@ -1088,7 +1111,6 @@
       state.heardJ = "";
       state.ignoreUntilTs = Date.now() + 500;
     } else {
-      // ✅ 자동이동 OFF 시에도 즉시 표시/히스토리 정리
       resetHeard();
       state.ignoreUntilTs = Date.now() + 300;
     }
