@@ -100,10 +100,6 @@
     if (document.getElementById("interim") && document.getElementById("final")) return;
     const wrap = document.createElement("section");
     wrap.style.cssText = "margin-top:12px; border:1px solid #252a36; border-radius:12px; overflow:hidden;";
-    const h = document.createElement("div");
-    h.textContent = "확정(최종) 전사";
-    h.style.cssText = "padding:10px 12px; background:#161a22; color:#b7c3d6; border-bottom:1px solid #252a36; font-size:14px;";
-    wrap.appendChild(h);
     const content = document.createElement("div");
     content.style.cssText = "padding:12px; background:#161a22;";
     const interim = document.createElement("div");
