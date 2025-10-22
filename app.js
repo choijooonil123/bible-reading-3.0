@@ -104,6 +104,11 @@
 
   // ---------- State ----------
   const IS_ANDROID = /Android/i.test(navigator.userAgent);
+
+  // 레벨미터 사용 허용 여부: 안드로이드는 기본 OFF(충돌 회피)
+  const METER_ALLOWED = !IS_ANDROID; 
+  let meterRunning = false;
+   
   const state = {
     bible: null, currentBookKo: null, currentChapter: null,
     verses: [], currentVerseIdx: 0,
@@ -669,45 +674,52 @@
 
   // ---------- 마이크 레벨 ----------
   let audioCtx, analyser, micSrc, levelTimer, micStream;
-  async function startMicLevel() {
-    try {
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 256;
-      micSrc = audioCtx.createMediaStreamSource(micStream);
-      micSrc.connect(analyser);
+   async function startMicLevel() {
+     if (!METER_ALLOWED) return;           // 안드로이드는 기본 OFF
+     if (state._sr?.listening) return;     // SR 중에는 절대 켜지 않음
+     if (meterRunning) return;
+     meterRunning = true;
+     try {
+       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+       analyser = audioCtx.createAnalyser();
+       analyser.fftSize = 256;
+       micSrc = audioCtx.createMediaStreamSource(micStream);
+       micSrc.connect(analyser);
+   
+       const dataArray = new Uint8Array(analyser.fftSize);
+       function update() {
+         if (!analyser || !meterRunning) return;
+         analyser.getByteTimeDomainData(dataArray);
+         let sumSq = 0;
+         for (let i = 0; i < dataArray.length; i++) {
+           const v = (dataArray[i] - 128) / 128;
+           sumSq += v * v;
+         }
+         const rms = Math.sqrt(sumSq / dataArray.length);
+         const db = 20 * Math.log10(rms || 1e-6);
+         if (els.micBar) els.micBar.style.width = Math.min(100, Math.max(0, rms * 400)) + "%";
+         if (els.micDb)  els.micDb.textContent = (db <= -60 ? "-∞" : db.toFixed(0)) + " dB";
+         levelTimer = requestAnimationFrame(update);
+       }
+       update();
+     } catch (e) {
+       console.warn("[MicLevel] 마이크 접근 실패:", e);
+       meterRunning = false;
+     }
+   }
+   
+   function stopMicLevel() {
+     meterRunning = false;
+     if (levelTimer) cancelAnimationFrame(levelTimer);
+     levelTimer = null;
+     if (audioCtx) { try { audioCtx.close(); } catch(_) {} }
+     if (micStream) { try { micStream.getTracks().forEach(t=>t.stop()); } catch(_) {} }
+     audioCtx = null; analyser = null; micSrc = null; micStream = null;
+     if (els.micBar) els.micBar.style.width = "0%";
+     if (els.micDb)  els.micDb.textContent = "-∞ dB";
+   }
 
-      const dataArray = new Uint8Array(analyser.fftSize);
-
-      function update() {
-        if (!analyser) return;
-        analyser.getByteTimeDomainData(dataArray);
-        let sumSq = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-          const v = (dataArray[i] - 128) / 128;
-          sumSq += v * v;
-        }
-        const rms = Math.sqrt(sumSq / dataArray.length);
-        const db = 20 * Math.log10(rms || 1e-6);
-        if (els.micBar) els.micBar.style.width = Math.min(100, Math.max(0, rms * 400)) + "%";
-        if (els.micDb) els.micDb.textContent = (db <= -60 ? "-∞" : db.toFixed(0)) + " dB";
-        levelTimer = requestAnimationFrame(update);
-      }
-      update();
-    } catch (e) {
-      console.warn("[MicLevel] 마이크 접근 실패:", e);
-    }
-  }
-  function stopMicLevel() {
-    if (levelTimer) cancelAnimationFrame(levelTimer);
-    levelTimer = null;
-    if (audioCtx) { try { audioCtx.close(); } catch(_) {} }
-    if (micStream) { try { micStream.getTracks().forEach(t=>t.stop()); } catch(_) {} }
-    audioCtx = null; analyser = null; micSrc = null; micStream = null;
-    if (els.micBar) els.micBar.style.width = "0%";
-    if (els.micDb) els.micDb.textContent = "-∞ dB";
-  }
 
   // ---------- STT (voice-bible 코어 이식 + bible-reading-3.0 통합) ----------
   (() => {
@@ -914,6 +926,10 @@
 
     async function startListening(showAlert=true){
       if (state._sr.listening) return;
+
+     // SR 시작 전, 레벨미터는 반드시 OFF (충돌 방지)
+     stopMicLevel();
+       
       if (!supportsSR()){
         if (hintEl) hintEl.innerHTML = "⚠️ 음성인식 미지원(Chrome/Samsung Internet 권장) — HTTPS에서 사용하세요.";
         if (showAlert) alert("이 브라우저는 음성인식을 지원하지 않습니다.");
@@ -939,12 +955,13 @@
       if (btnMic) btnMic.textContent="⏹️";
       refreshRecogModeLock();
 
-      state._sr.rec = createRecognizer();
-      if (!state._sr.rec){
-        alert("음성인식 초기화 실패");
-        stopListening();
-        return;
-      }
+     state._sr.rec = createRecognizer();
+     if (!state._sr.rec){
+       alert("음성인식 초기화 실패");
+       // SR 못 켰으면, 레벨미터는 필요 시 다시 ON
+       if (METER_ALLOWED) startMicLevel();
+       return;
+     }
 
       state._sr.rec.onresult = (e) => {
         let interim = '', fin = '';
@@ -984,13 +1001,14 @@
         }
       };
 
-      try { state._sr.rec.start(); }
-      catch(e){
-        console.warn("rec.start 실패:", e);
-        stopListening(false);
-        return;
-      }
-    }
+     try { state._sr.rec.start(); }
+     catch(e){
+       console.warn("rec.start 실패:", e);
+       // SR 시작 실패 시, 레벨미터 복구
+       if (METER_ALLOWED) startMicLevel();
+       return;
+     }
+   }
 
     function stopListening(resetBtn=true){
       state._sr.userStopped = true;
@@ -1007,9 +1025,11 @@
         state._sr.rec = null;
       }
 
-      stopMicLevel();
-      if (resetBtn && btnMic) btnMic.textContent="🎙️";
-      refreshRecogModeLock();
+     // SR이 완전히 내려갔으니, 레벨미터는 허용되는 환경이면 다시 ON
+     if (METER_ALLOWED) startMicLevel();
+   
+     if (resetBtn && btnMic) btnMic.textContent="🎙️";
+     refreshRecogModeLock();
     }
 
     // 앱 마이크 토글
