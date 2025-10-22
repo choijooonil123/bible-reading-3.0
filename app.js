@@ -95,37 +95,6 @@
   }
   ensureHeardBox();
 
-  // voice-bible 스타일의 임시/최종 출력 박스 자동 생성 (없을 때만)
-  function ensureVoiceBibleUI() {
-    if (document.getElementById("interim") && document.getElementById("final")) return;
-    const wrap = document.createElement("section");
-    wrap.style.cssText = "margin-top:12px; border:1px solid #252a36; border-radius:12px; overflow:hidden;";
-    const content = document.createElement("div");
-    content.style.cssText = "padding:12px; background:#161a22;";
-    const interim = document.createElement("div");
-    interim.id = "interim";
-    interim.textContent = "(말하면 여기에 흐릿하게 보입니다…)";
-    interim.style.cssText = "min-height:40px; color:#cbd5e1; white-space:pre-wrap; line-height:1.6;";
-    const final = document.createElement("div");
-    final.id = "final";
-    final.style.cssText = "min-height:90px; margin-top:10px; color:#ffffff; white-space:pre-wrap; line-height:1.6;";
-    content.appendChild(interim);
-    content.appendChild(final);
-    const footer = document.createElement("div");
-    footer.style.cssText = "display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;";
-    footer.innerHTML = `
-      <label class="chip" style="font-size:12px; padding:6px 8px; border-radius:999px; border:1px solid #252a36;">
-        <input type="checkbox" id="autoPunc" checked> 구두점 보정(간단)
-      </label>
-      <label class="chip" style="font-size:12px; padding:6px 8px; border-radius:999px; border:1px solid #252a36;">
-        <input type="checkbox" id="autoscroll" checked> 자동 스크롤
-      </label>`;
-    content.appendChild(footer);
-    wrap.appendChild(content);
-    (els.verseContainer || document.body).appendChild(wrap);
-  }
-  ensureVoiceBibleUI();
-   
   // 모달이 닫혀있을 때는 클릭 차단
   if (els.matrixModal) els.matrixModal.style.pointerEvents = "none";
 
