@@ -480,26 +480,32 @@
 
   // ---------- 표시/매칭 ----------
   // ✅ 새 절로 넘어갈 때, 표시/히스토리/타이밍을 한 번에 초기화
-function resetHeard() {
-  // 화면 표시 텍스트 초기화
-  if (els.heardBox) els.heardBox.textContent = "";
-  if (els.heardTextLine) els.heardTextLine.textContent = "";
+  function resetHeard() {
+    // 화면 표시 텍스트 초기화
+    if (els.heardBox) els.heardBox.textContent = "";
+    if (els.heardTextLine) els.heardTextLine.textContent = "";
 
-  // STT 누적/중간 상태 초기화
-  if (state._sr) {
-    state._sr.historyTokens = [];
-    state._sr.historyBase   = [];
+    // voice-bible 미러링 요소(있으면 함께 비움)
+    const interimEl = document.getElementById("interim");
+    const finalEl   = document.getElementById("final");
+    if (interimEl) interimEl.textContent = "";
+    if (finalEl)   finalEl.textContent   = "";
+
+    // STT 누적/중간 상태 초기화
+    if (state._sr) {
+      state._sr.historyTokens = [];
+      state._sr.historyBase   = [];
+    }
+    state.heardText = "";
+    state.heardRaw  = "";
+    state.heardJ    = "";
+
+    // 페인트/매칭 타이밍 초기화
+    state.paintedPrefix = 0;
+    state.pendingPaint  = 0;
+    state.ignoreUntilTs = 0;
+    if (state.paintTimer) { clearTimeout(state.paintTimer); state.paintTimer = null; }
   }
-  state.heardText = "";
-  state.heardRaw  = "";
-  state.heardJ    = "";
-
-  // 페인트/매칭 타이밍 초기화
-  state.paintedPrefix = 0;
-  state.pendingPaint  = 0;
-  state.ignoreUntilTs = 0;
-  if (state.paintTimer) { clearTimeout(state.paintTimer); state.paintTimer = null; }
-}
 
   function decomposeJamo(s){
     const CHO = ["ㄱ","ㄲ","ㄴ","ㄷ","ㄸ","ㄹ","ㅁ","ㅂ","ㅃ","ㅅ","ㅆ","ㅇ","ㅈ","ㅉ","ㅊ","ㅋ","ㅌ","ㅍ","ㅎ"];
@@ -574,28 +580,12 @@ function resetHeard() {
     state.charJamoLens = jamoLens;
     return cum;
   }
-   function updateVerseText() {
-     const v = state.verses[state.currentVerseIdx] || "";
-   
-     // ✅ 한 줄로 깔끔히 초기화(표시 + STT 히스토리 + 페인트 타이머)
-     resetHeard();
-     state._advancing = false;
-   
-     state.targetJ = normalizeToJamo(v, false);
-     state.charCumJamo = buildCharToJamoCumMap(v);
-   
-     // (이하 기존 표시/라벨/버튼 활성화 로직 그대로 유지)
-     els.locLabel && (els.locLabel.textContent =
-       `${state.currentBookKo} ${state.currentChapter}장 ${state.currentVerseIdx + 1}절`);
-     if (els.verseText) {
-       els.verseText.innerHTML = "";
-       for (let i = 0; i < v.length; i++) {
-         const s = document.createElement("span");
-         s.textContent = v[i];
-         s.style.color = "";
-         els.verseText.appendChild(s);
-       }
-     }
+  function updateVerseText() {
+    const v = state.verses[state.currentVerseIdx] || "";
+
+    // ✅ 초기화(표시 + STT 히스토리 + 페인트 타이머)
+    resetHeard();
+    state._advancing = false;
 
     state.targetJ = normalizeToJamo(v, false);
     state.charCumJamo = buildCharToJamoCumMap(v);
@@ -617,7 +607,6 @@ function resetHeard() {
       [...els.verseGrid.children].forEach((btn, idx) =>
         btn.classList.toggle("active", idx===state.currentVerseIdx));
     }
-
     if (els.listenHint){
       els.listenHint.textContent = "음성을 말씀하시면 인식된 문장을 아래에 보여드려요. (유사도 90% 이상이면 자동으로 다음 절)";
     }
@@ -720,13 +709,21 @@ function resetHeard() {
     if (els.micDb) els.micDb.textContent = "-∞ dB";
   }
 
-  // ---------- STT (Android Web, 강력 중복제거 + 간단 구두점 보정, 앱 통합판) ----------
+  // ---------- STT (voice-bible 코어 이식 + bible-reading-3.0 통합) ----------
   (() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
     const btnMic = els.btnToggleMic;
     const hintEl = els.listenHint;
 
-    // STT 상태(앱 구조 유지)
+    // voice-bible 미러링 대상(있으면 함께 업데이트)
+    const interimEl    = document.getElementById("interim");
+    const finalEl      = document.getElementById("final");
+    const autoPuncEl   = document.getElementById("autoPunc");
+    const autoscrollEl = document.getElementById("autoscroll");
+    const langSel      = document.getElementById("lang");
+
+    // STT 상태
     state._sr = {
       rec: null,
       listening: false,
@@ -735,66 +732,68 @@ function resetHeard() {
       historyBase: []
     };
 
-    // 숫자 → 한글 수사 변환 (본문/인식 텍스트 통일)
-    function toHangulDigitsAll(input) {
-      if (!input) return input;
-      return input.replace(/-?\d+(?:[.,:/-]\d+)*?/g, (token) => convertToken(token));
-    }
-    function convertToken(token) {
-      const parts = token.split(/([.:/,\-])/);
-      return parts.map(p => {
-        if (/^-?\d+$/.test(p)) return intToHangul(p);
-        if (/^\d+\.\d+$/.test(p)) return decimalToHangul(p);
-        return p === '.' ? '점' : p;
-      }).join('');
-    }
+    // ===== 숫자 → 한글 수사 통일 =====
     const _N = ['영','일','이','삼','사','오','육','칠','팔','구'];
     const _U_SMALL = ['', '십', '백', '천'];
     const _U_BIG   = ['', '만', '억', '조', '경'];
+
+    function fourToHangul(chunk){
+      chunk = chunk.padStart(4, '0');
+      let res = '';
+      for (let i=0;i<4;i++){
+        const d = +chunk[i];
+        if (d === 0) continue;
+        const unit  = _U_SMALL[4 - i - 1];
+        const digit = (d === 1 && unit) ? '' : _N[d];
+        res += digit + unit;
+      }
+      return res || '';
+    }
     function intToHangul(numStr){
       let neg = false;
       if (numStr.startsWith('-')) { neg = true; numStr = numStr.slice(1); }
       if (numStr === '0') return '영';
       numStr = numStr.replace(/^0+/, '');
       const chunks = [];
-      for (let i = numStr.length; i > 0; i -= 4) {
-        chunks.unshift(numStr.substring(Math.max(0, i-4), i));
+      for (let i=numStr.length; i>0; i-=4){
+        chunks.unshift(numStr.substring(Math.max(0,i-4), i));
       }
-      let out = [];
-      chunks.forEach((chunk, idxFromLeft) => {
-        const w = fourToHangul(chunk);
-        if (w) {
-          const bigUnit = _U_BIG[chunks.length - idxFromLeft - 1] || '';
-          out.push(w + bigUnit);
+      const out = [];
+      chunks.forEach((c, idxFromLeft)=>{
+        const w = fourToHangul(c);
+        if (w){
+          const big = _U_BIG[chunks.length - idxFromLeft - 1] || '';
+          out.push(w + big);
         }
       });
       return (neg ? '마이너스 ' : '') + out.join('');
     }
-    function fourToHangul(chunk){
-      chunk = chunk.padStart(4, '0');
-      let res = '';
-      for (let i = 0; i < 4; i++){
-        const d = +chunk[i];
-        if (d === 0) continue;
-        const unit = _U_SMALL[4 - i - 1];
-        const digit = (d === 1 && unit) ? '' : _N[d];
-        res += digit + unit;
-      }
-      return res || '';
-    }
     function decimalToHangul(s){
       const [a,b] = s.split('.');
-      const left = intToHangul(a);
+      const left  = intToHangul(a);
       const right = b.split('').map(d => _N[+d]).join(' ');
       return `${left}점 ${right}`;
     }
+    function toHangulDigitsAll(input){
+      if (!input) return input;
+      return input.replace(/-?\d+(?:[.,:/-]\d+)*?/g, (token) => {
+        const parts = token.split(/([.:/,\-])/);
+        return parts.map(p=>{
+          if (/^-?\d+$/.test(p))   return intToHangul(p);
+          if (/^\d+\.\d+$/.test(p)) return decimalToHangul(p);
+          return p === '.' ? '점' : p;
+        }).join('');
+      });
+    }
 
-    // 구두점 보정/토크나이즈
-    const normalizeSpaces = (s)=> s.replace(/\s+/g,' ').trim();
+    // ===== 구두점·토큰 유틸 =====
+    const normalizeSpaces = (s)=> (s||'').replace(/\s+/g,' ').trim();
     const stripPuncTail   = (w)=> w.replace(/[\.,!?;:·…~]+$/u,'');
     const tokenize        = (s)=> normalizeSpaces(s).split(' ').filter(Boolean);
     const baseTokens      = (tokens)=> tokens.map(t=> stripPuncTail(t.toLowerCase()));
     function punctuate(str){
+      const apply = (autoPuncEl ? !!autoPuncEl.checked : true);
+      if (!apply) return str;
       let s = normalizeSpaces(str);
       s = s.replace(/([가-힣a-zA-Z0-9\)])\s*(?:\n|$)/g, '$1.\n');
       s = s.replace(/\.\.+/g,'.');
@@ -807,31 +806,57 @@ function resetHeard() {
       for(const p of parts){
         const t = (p||'').trim(); if(!t) continue;
         const last = out[out.length-1] || '';
-        if(last === t) continue;
-        if(last && (t.startsWith(last) || last.startsWith(t))){
+        if (last === t) continue;
+        if (last && (t.startsWith(last) || last.startsWith(t))){
           out[out.length-1] = (t.length >= last.length) ? t : last;
         } else out.push(t);
       }
       return out.join(' ');
     }
 
-    // 최종 누적 + 중복제거 → 화면반영 → 매칭(최종)
+    // ===== 매칭/페인트/자동이동 훅 =====
+    function _applyMatchingAndMaybeAdvance(isFinal, candidateFullText){
+      const v = state.verses[state.currentVerseIdx] || "";
+      if (!v) return;
+      if (Date.now() < state.ignoreUntilTs) return;
+
+      const vSafe    = toHangulDigitsAll(v);
+      const candSafe = toHangulDigitsAll(candidateFullText);
+
+      const sim = similarityToTarget(vSafe, candSafe);
+      const targetLenJamo = (state.targetJ || normalizeToJamo(vSafe, false)).length;
+
+      const paintTo = Math.min(targetLenJamo, Math.floor(sim * targetLenJamo));
+      schedulePaint(paintTo);
+
+      if (isFinal && sim >= 0.90){
+        if (!state._advancing){
+          state._advancing = true;
+          setTimeout(async () => {
+            await completeVerse(true);
+            state._advancing = false;
+          }, 120);
+        }
+      }
+    }
+
+    // ===== 최종 누적 + 강력 중복 제거 → 화면반영 → 매칭(최종) =====
     function appendFinalDedup(newText){
       const newT = tokenize(newText);
       const newB = baseTokens(newT);
-      if(newT.length === 0) return;
+      if (!newT.length) return;
 
-      if(state._sr.historyTokens.length){
+      if (state._sr.historyTokens.length){
         const tailLen = Math.min(state._sr.historyBase.length, 80, newB.length);
         let k = 0;
-        for(let len = tailLen; len > 0; len--){
+        for (let len=tailLen; len>0; len--){
           const suffix = state._sr.historyBase.slice(-len).join(' ');
           const prefix = newB.slice(0, len).join(' ');
-          if(suffix === prefix){ k = len; break; }
+          if (suffix === prefix){ k = len; break; }
         }
         const remainderT = newT.slice(k);
         const remainderB = newB.slice(k);
-        if(remainderT.length === 0) return;
+        if (!remainderT.length) return;
         state._sr.historyTokens = state._sr.historyTokens.concat(remainderT);
         state._sr.historyBase   = state._sr.historyBase.concat(remainderB);
       } else {
@@ -845,55 +870,44 @@ function resetHeard() {
       state._sr.historyBase   = baseTokens(state._sr.historyTokens);
 
       const finalText = punctuate(toHangulDigitsAll(state._sr.historyTokens.join(' ')));
+
+      // 앱 UI
       if (els.heardBox) els.heardBox.textContent = finalText;
+      // voice-bible 미러링
+      if (finalEl) {
+        finalEl.textContent = finalText;
+        if (autoscrollEl && autoscrollEl.checked){
+          finalEl.scrollIntoView({ behavior:'smooth', block:'end' });
+        }
+      }
 
       _applyMatchingAndMaybeAdvance(true, finalText);
     }
 
-    // 중간 후보 → 화면반영 → 매칭(중간)
+    // ===== 중간 후보 → 화면반영 → 매칭(중간) =====
     function applyInterimCandidate(interimRaw){
       if (!interimRaw) return;
       const candidate = toHangulDigitsAll(
         (state._sr.historyTokens.join(' ') + ' ' + interimRaw).trim()
       );
-      if (els.heardBox) els.heardBox.textContent = punctuate(candidate);
+      const printed = punctuate(candidate);
+
+      // 앱 UI
+      if (els.heardBox) els.heardBox.textContent = printed;
+      // voice-bible 미러링
+      if (interimEl) interimEl.textContent = printed;
+
       _applyMatchingAndMaybeAdvance(false, candidate);
     }
 
-    // 매칭/페인트/자동이동 (새 STT에서 사용)
-    function _applyMatchingAndMaybeAdvance(isFinal, candidateFullText){
-      let v = state.verses[state.currentVerseIdx] || "";
-      if(!v) return;
-      if(Date.now() < state.ignoreUntilTs) return;
-
-      const vSafe    = toHangulDigitsAll(v);
-      const candSafe = toHangulDigitsAll(candidateFullText);
-
-      const sim = similarityToTarget(vSafe, candSafe);
-      const targetLenJamo = (state.targetJ || normalizeToJamo(vSafe, false)).length;
-
-      const paintTo = Math.min(targetLenJamo, Math.floor(sim * targetLenJamo));
-      schedulePaint(paintTo);
-
-      if(isFinal && sim >= 0.90){
-        if(!state._advancing){
-          state._advancing = true;
-          setTimeout(async () => {
-            await completeVerse(true);
-            state._advancing = false;
-          }, 120);
-        }
-      }
-    }
-
-    // recognizer 생성/수명주기
+    // ===== Recognizer 수명주기 =====
     function createRecognizer(){
-      if(!SR) return null;
+      if (!SR) return null;
       const r = new SR();
       r.continuous = true;
       r.interimResults = true;
-      r.lang = 'ko-KR';
       try { r.maxAlternatives = 4; } catch(_){}
+      r.lang = (langSel && langSel.value) || 'ko-KR';
       return r;
     }
     function supportsSR(){ return !!SR; }
@@ -901,49 +915,54 @@ function resetHeard() {
     async function startListening(showAlert=true){
       if (state._sr.listening) return;
       if (!supportsSR()){
-        if (hintEl) hintEl.innerHTML="⚠️ 음성인식 미지원(Chrome/Samsung Internet 권장) — HTTPS에서 사용하세요.";
+        if (hintEl) hintEl.innerHTML = "⚠️ 음성인식 미지원(Chrome/Samsung Internet 권장) — HTTPS에서 사용하세요.";
         if (showAlert) alert("이 브라우저는 음성인식을 지원하지 않습니다.");
         return;
       }
 
-      await startMicLevel();
+      await startMicLevel(); // 레벨바 시작
 
-      state._sr.userStopped = false;
-      state._sr.listening   = true;
+      state._sr.userStopped   = false;
+      state._sr.listening     = true;
       state._sr.historyTokens = [];
       state._sr.historyBase   = [];
-      state.paintedPrefix   = 0;
-      state.ignoreUntilTs   = 0;
-      state._advancing      = false;
-      if (state.paintTimer){ clearTimeout(state.paintTimer); state.paintTimer=null; }
+      state.paintedPrefix     = 0;
+      state.ignoreUntilTs     = 0;
+      state._advancing        = false;
+      if (state.paintTimer){ clearTimeout(state.paintTimer); state.paintTimer = null; }
+
+      // 출력 초기화
       if (els.heardBox) els.heardBox.textContent = "";
+      if (interimEl) interimEl.textContent = "";
+      if (finalEl)   finalEl.textContent   = "";
+
       if (btnMic) btnMic.textContent="⏹️";
       refreshRecogModeLock();
 
       state._sr.rec = createRecognizer();
-      if(!state._sr.rec){
+      if (!state._sr.rec){
         alert("음성인식 초기화 실패");
         stopListening();
         return;
       }
 
       state._sr.rec.onresult = (e) => {
-        let interim = '';
-        let fin = '';
-        for (let i = e.resultIndex; i < e.results.length; i++){
+        let interim = '', fin = '';
+        for (let i=e.resultIndex; i<e.results.length; i++){
           const r = e.results[i];
-          if(r.isFinal) fin += r[0].transcript;
+          if (r.isFinal) fin += r[0].transcript;
           else interim += r[0].transcript;
         }
 
+        // 숫자 즉시 한글화 (일관성 ↑)
         if (interim) {
           const interimSafe = interim.replace(/\d/g, d => "영일이삼사오육칠팔구"[d]);
           applyInterimCandidate(interimSafe);
         }
-
         if (fin) {
           const finSafe = fin.replace(/\d/g, d => "영일이삼사오육칠팔구"[d]);
           appendFinalDedup(finSafe);
+          if (interimEl) interimEl.textContent = ""; // 확정 나오면 임시 클리어
         }
       };
 
@@ -959,12 +978,14 @@ function resetHeard() {
       };
 
       state._sr.rec.onend = () => {
-        if(!state._sr.userStopped){
+        // 의도치 않은 종료면 자동 재시작 (모바일 안정화)
+        if (!state._sr.userStopped){
           try { state._sr.rec && state._sr.rec.start(); } catch(_){}
         }
       };
 
-      try { state._sr.rec.start(); } catch(e){
+      try { state._sr.rec.start(); }
+      catch(e){
         console.warn("rec.start 실패:", e);
         stopListening(false);
         return;
@@ -975,7 +996,7 @@ function resetHeard() {
       state._sr.userStopped = true;
       state._sr.listening   = false;
 
-      if(state._sr.rec){
+      if (state._sr.rec){
         try{
           state._sr.rec.onresult=null;
           state._sr.rec.onerror=null;
@@ -991,14 +1012,19 @@ function resetHeard() {
       refreshRecogModeLock();
     }
 
-    // 앱의 마이크 토글 버튼 연결
-    els.btnToggleMic?.addEventListener("click", ()=>{ 
-      if(!state._sr.listening) startListening(); 
-      else stopListening(); 
+    // 앱 마이크 토글
+    els.btnToggleMic?.addEventListener("click", ()=> {
+      if (!state._sr.listening) startListening();
+      else                      stopListening();
     });
 
-    // 필요 시 전역 노출
-    window.__stt = { startListening, stopListening };
+    // voice-bible 호환: 언어 변경 시 재시작(해당 요소 있는 경우)
+    langSel?.addEventListener("change", ()=>{
+      if (state._sr?.listening){ stopListening(false); setTimeout(startListening, 120); }
+    });
+
+    // 전역 디버그 노출(선택)
+    window.__stt = { startListening, stopListening, resetHeard };
   })();
 
   // ---------- 완료/자동이동 ----------
@@ -1041,11 +1067,11 @@ function resetHeard() {
       state.paintedPrefix = 0;
       state.heardJ = "";
       state.ignoreUntilTs = Date.now() + 500;
-      } else {
-        // ✅ 자동이동 OFF 시에도 즉시 표시/히스토리 정리
-        resetHeard();
-        state.ignoreUntilTs = Date.now() + 300;
-      }
+    } else {
+      // ✅ 자동이동 OFF 시에도 즉시 표시/히스토리 정리
+      resetHeard();
+      state.ignoreUntilTs = Date.now() + 300;
+    }
   }
 
   // ---------- 앞/뒤 절 버튼 ----------
@@ -1197,7 +1223,7 @@ function resetHeard() {
 
     thead.appendChild(trTop);
     thead.appendChild(trMiddle);
-    thead.appendChild(trBottom); // (타이포 수정: theadj -> thead)
+    thead.appendChild(trBottom);
     table.appendChild(thead);
 
     const tbody = document.createElement("tbody");
