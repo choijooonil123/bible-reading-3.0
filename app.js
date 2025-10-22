@@ -911,6 +911,9 @@
       if (els.heardBox) els.heardBox.textContent = finalText;
       if (finalEl) {
         finalEl.textContent = finalText;
+
+         console.log("[STT Final Text]", finalText);
+
         if (autoscrollEl && autoscrollEl.checked){
           finalEl.scrollIntoView({ behavior:'smooth', block:'end' });
         }
